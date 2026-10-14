@@ -3,22 +3,34 @@ const cors = require('cors');
 const path = require('path');
 const { createClient } = require('@supabase/supabase-js');
 
+const { createTrainScheduleService } = require('./train-schedules');
+
+function createApp({ supabaseClient, scheduleService } = {}) {
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 const supabaseUrl = 'https://gmjpifzyghtosnktcebn.supabase.co';
 const supabaseKey = 'sb_publishable_RvYf7D1dSsi4R8YLowcjqA_Q7EpGo8O';
-const supabase = createClient(supabaseUrl, supabaseKey);
+const supabase = supabaseClient || createClient(supabaseUrl, supabaseKey);
+const schedules = scheduleService || createTrainScheduleService({
+    fetchTrains: signal => supabase.from('trains').select('*').order('trainID').abortSignal(signal)
+});
 
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
 
 app.get('/api/trains', async (req, res) => {
-    const { data, error } = await supabase.from('trains').select('*').order('trainID');
-    if (error) return res.status(500).json({ error: error.message });
-    res.json(data);
+    res.set('Cache-Control', 'no-store');
+    try {
+        res.json(await schedules.getTrainSchedulesWithFallback());
+    } catch (error) {
+        res.status(error.status || 500).json({
+            trains: [], source: 'unavailable', bookingAllowed: false,
+            lastUpdated: null, message: error.message
+        });
+    }
 });
 
 app.patch('/api/trains/:id', async (req, res) => {
@@ -49,8 +61,17 @@ app.post('/api/book', async (req, res) => {
     const { trainID, passengerID, name, contactNumber, paymentMethod, numberOfTickets } = req.body;
     const count = parseInt(numberOfTickets) || 1;
 
-    const { data: train, error: trainError } = await supabase.from('trains').select('availableSeats').eq('trainID', trainID).single();
-    if (trainError || !train) return res.status(400).json({ message: 'Train not found.' });
+    let schedule;
+    try {
+        schedule = await schedules.getTrainSchedulesWithFallback();
+    } catch (error) {
+        return res.status(error.status || 503).json({ message: error.message });
+    }
+    if (!schedule.bookingAllowed) {
+        return res.status(503).json({ message: 'Booking is temporarily unavailable. Please refresh the schedules and try again later.' });
+    }
+    const train = schedule.trains.find(train => train.trainID === trainID);
+    if (!train) return res.status(400).json({ message: 'Train not found.' });
     if (train.availableSeats < count) return res.status(400).json({ message: `Only ${train.availableSeats} seat(s) available. Requested: ${count}.` });
 
     const ticketStatus = paymentMethod === 'Cash at Station' ? 'Pending' : 'Confirmed';
@@ -239,5 +260,12 @@ app.patch('/api/tickets/:id/reject', async (req, res) => {
     await supabase.from('tickets').update({ status: 'Cancelled' }).eq('ticketNumber', req.params.id);
     res.json({ message: 'Rejected' });
 });
-const PORT = 3000;
-app.listen(PORT, () => { console.log(`Server running on port ${PORT}`); });
+return app;
+}
+
+if (require.main === module) {
+    const PORT = 3000;
+    createApp().listen(PORT, () => { console.log(`Server running on port ${PORT}`); });
+}
+
+module.exports = { createApp };

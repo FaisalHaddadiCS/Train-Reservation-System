@@ -246,6 +246,8 @@
         </div>
 
         <div id="schedules-section">
+            <p id="schedule-status" role="status" aria-live="polite"></p>
+            <button type="button" class="select-btn" onclick="loadSchedules()">Refresh schedules</button>
             <div style="overflow-x: auto;">
                <div id="add-route-box" style="background: var(--bg-input); padding: 20px; border-radius: 12px; margin-bottom: 25px; border: 1px solid var(--border-color); display: none;">
                     <h4 style="margin-top:0; margin-bottom:15px; color: var(--text-main);">Add New Train Route</h4>
@@ -274,6 +276,8 @@
         </div>
 
         <div id="booking-section">
+            <p id="booking-status" role="status" aria-live="polite"></p>
+            <button type="button" class="select-btn" onclick="loadBookingTrains()">Refresh schedules</button>
             <input type="text" id="trainSearch" class="search-bar" placeholder="🔍 Search trains by route or ID..." onkeyup="filterTrains()">
             
             <div id="train-selection-list"></div>
@@ -314,7 +318,7 @@
                     🎫 <span id="price-summary-text"></span>
                 </div>
 
-                <button type="submit" class="primary-btn" style="width:auto; padding: 14px 40px; margin-top: 10px;">Confirm & Issue Ticket(s)</button>
+                <button id="booking-submit" type="submit" class="primary-btn" disabled style="width:auto; padding: 14px 40px; margin-top: 10px;">Confirm & Issue Ticket(s)</button>
             </form>
 
             <div id="admin-tickets-section">
@@ -664,9 +668,54 @@
             if(tab === 'passengers') loadAdminPassengers();
         }
 
+        let bookingAllowed = false;
+        let scheduleRequestVersion = 0;
+
+        function setBookingAvailability(allowed) {
+            bookingAllowed = allowed;
+            document.getElementById('booking-submit').disabled = !allowed;
+            if (!allowed) {
+                document.getElementById('trainID').value = '';
+                window._selectedTrainPrice = 0;
+                document.getElementById('price-summary').style.display = 'none';
+                document.querySelectorAll('#train-selection-list .select-btn').forEach(button => { button.disabled = true; });
+            }
+        }
+
+        async function fetchTrainSchedules() {
+            const version = ++scheduleRequestVersion;
+            setBookingAvailability(false);
+            for (const id of ['schedule-status', 'booking-status']) {
+                document.getElementById(id).textContent = 'Loading schedules...';
+            }
+            let data;
+            try {
+                const res = await fetch(`${API_URL}/trains`, { cache: 'no-store', signal: AbortSignal.timeout(8000) });
+                data = await res.json();
+                if (!res.ok || !Array.isArray(data.trains)) {
+                    throw new Error(data.message || 'Schedules are temporarily unavailable. Please try again later.');
+                }
+            } catch (error) {
+                data = { trains: [], source: 'unavailable', bookingAllowed: false,
+                    message: error.name === 'TimeoutError' || error instanceof TypeError
+                        ? 'Could not reach the server. Please refresh and try again.' : error.message };
+            }
+            if (version !== scheduleRequestVersion) return null;
+            const allowed = data.source === 'live' && data.bookingAllowed === true;
+            setBookingAvailability(allowed);
+            const message = data.source === 'cache'
+                ? `${data.message} Last updated: ${new Date(data.lastUpdated).toLocaleString()}`
+                : data.source === 'live' ? 'Schedules updated. Booking is available.' : data.message;
+            for (const id of ['schedule-status', 'booking-status']) {
+                document.getElementById(id).textContent = message;
+            }
+            return data;
+        }
+
         async function loadSchedules() {
-            const res = await fetch(`${API_URL}/trains`);
-            const trains = await res.json();
+            const schedule = await fetchTrainSchedules();
+            if (!schedule) return;
+            const trains = schedule.trains;
             const list = document.getElementById('scheduleList');
             let htmlStr = '';
             
@@ -677,7 +726,7 @@
                 if(dbStatus === 'Cancelled' || t.availableSeats === 0) statusClass = 'status-cancelled';
                 const finalStatus = t.availableSeats === 0 ? 'Full' : dbStatus;
 
-                const actionsHtml = (currentRole === 'admin') ? `
+                const actionsHtml = (currentRole === 'admin' && schedule.bookingAllowed) ? `
                     <td style="text-align: center; width: 100px;">
                         <button class="action-btn" onclick="openEditModal('${t.trainID}', '${t.price}', '${dbStatus}', '${t.departureDate}', '${t.departuretime || '10:00'}', '${t.totalCapacity}', '${t.totalCapacity - t.availableSeats}')" title="Edit">✏️</button>
                     </td>` : '';
@@ -694,7 +743,7 @@
                     </tr>
                 `;
             });
-            list.innerHTML = htmlStr;
+            list.innerHTML = htmlStr || '<tr><td colspan="7">No schedules to display.</td></tr>';
         }
 
         function openEditModal(id, price, status, date, time, capacity, booked) {
@@ -764,14 +813,15 @@
         
 
         async function loadBookingTrains() {
-            const res = await fetch(`${API_URL}/trains`);
-            const trains = await res.json();
+            const schedule = await fetchTrainSchedules();
+            if (!schedule) return;
+            const trains = schedule.trains;
             const list = document.getElementById('train-selection-list');
             let htmlStr = '';
             
             trains.forEach(t => {
                 const dbStatus = t.status || 'On Time';
-                const isUnavailable = t.availableSeats === 0 || dbStatus === 'Cancelled';
+                const isUnavailable = !schedule.bookingAllowed || t.availableSeats === 0 || dbStatus === 'Cancelled';
                 let btnHtml = isUnavailable 
                     ? `<button type="button" class="select-btn" style="border-color:#dc2626; color:#dc2626; cursor:not-allowed;" disabled>Unavailable</button>` 
                     : `<button type="button" class="select-btn" onclick="selectTrainForBooking('${t.trainID}')">Select</button>`;
@@ -786,7 +836,7 @@
                     </div>
                 `;
             });
-            list.innerHTML = htmlStr;
+            list.innerHTML = htmlStr || '<p>No schedules to display.</p>';
         }
 
         function filterTrains() {
@@ -800,6 +850,7 @@
         }
 
         function selectTrainForBooking(id) {
+            if (!bookingAllowed) return;
             const input = document.getElementById('trainID');
             input.value = id;
             input.style.borderColor = 'var(--primary-blue)';
@@ -854,6 +905,10 @@
 
         async function bookTicket(event) {
             event.preventDefault();
+            if (!bookingAllowed) {
+                showSmartModal('error', 'Booking Unavailable', 'Refresh schedules before booking.');
+                return;
+            }
             const count = parseInt(document.getElementById('numberOfTickets').value) || 1;
             const payload = { 
                 trainID: document.getElementById('trainID').value, 
@@ -868,8 +923,19 @@
                 showSmartModal('error', 'Missing Selection', 'Please select a route from the list first.'); return; 
             }
             
-            const res = await fetch(`${API_URL}/book`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
-            const result = await res.json();
+            let res, result;
+            try {
+                res = await fetch(`${API_URL}/book`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
+                result = await res.json();
+            } catch (error) {
+                setBookingAvailability(false);
+                showSmartModal('error', 'Connection Lost', 'The booking result is unknown. Check your bookings before submitting again.');
+                return;
+            }
+            if (res.status === 503) {
+                setBookingAvailability(false);
+                document.getElementById('booking-status').textContent = result.message;
+            }
             
             if(res.ok) {
                 let successMsg = '';
