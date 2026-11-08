@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const { createTrainScheduleService } = require('../train-schedules');
 const { createApp } = require('../server');
 const { once } = require('node:events');
+const { databaseFixture, login } = require('../test-support/database.cjs');
 
 const train = { trainID: 'TR-01', availableSeats: 2, price: 150 };
 const live = () => ({ data: [train], error: null, status: 200 });
@@ -102,6 +103,7 @@ test('successful empty schedules are valid and invalid data is not cached', asyn
 
 async function serve(t, app) {
     const server = app.listen(0, '127.0.0.1');
+    t.after(() => app.locals.dispose());
     t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
     await once(server, 'listening');
     return `http://127.0.0.1:${server.address().port}`;
@@ -110,7 +112,8 @@ async function serve(t, app) {
 test('HTTP flow: live, cached outage, blocked booking, and recovery', async t => {
     const f = fixture();
     let writes = 0;
-    const base = await serve(t, createApp({ scheduleService: f.service, supabaseClient: { from() { writes++; throw Error('Unexpected database write'); } } }));
+    const auth = databaseFixture();
+    const base = await serve(t, createApp({ databaseClient: auth.database, scheduleService: f.service, supabaseClient: { from() { writes++; throw Error('Unexpected database write'); } } }));
     const page = await fetch(base);
     assert.equal(page.status, 200);
     assert.match(await page.text(), /Train Booking \| Portal/);
@@ -121,7 +124,8 @@ test('HTTP flow: live, cached outage, blocked booking, and recovery', async t =>
     const stale = await fetch(base + '/api/trains');
     assert.equal(stale.status, 200);
     assert.equal((await stale.json()).bookingAllowed, false);
-    const book = await fetch(base + '/api/book', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trainID: 'TR-01' }) });
+    const headers = await login(base);
+    const book = await fetch(base + '/api/book', { method: 'POST', headers, body: JSON.stringify({ trainID: 'TR-01', numberOfTickets: 1 }) });
     assert.equal(book.status, 503); assert.equal(writes, 0);
     f.respond(live);
     assert.equal((await (await fetch(base + '/api/trains')).json()).bookingAllowed, true);
@@ -129,30 +133,26 @@ test('HTTP flow: live, cached outage, blocked booking, and recovery', async t =>
 
 test('HTTP outage without snapshot returns 503 and prevents database writes', async t => {
     const f = fixture(); f.respond(offline);
-    const base = await serve(t, createApp({ scheduleService: f.service, supabaseClient: { from() { throw Error('Unexpected write'); } } }));
+    const auth = databaseFixture();
+    const base = await serve(t, createApp({ databaseClient: auth.database, scheduleService: f.service, supabaseClient: { from() { throw Error('Unexpected write'); } } }));
     const response = await fetch(base + '/api/trains');
     assert.equal(response.status, 503);
     assert.equal((await response.json()).source, 'unavailable');
-    const booking = await fetch(base + '/api/book', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const headers = await login(base);
+    const booking = await fetch(base + '/api/book', { method: 'POST', headers, body: JSON.stringify({ numberOfTickets: 1 }) });
     assert.equal(booking.status, 503);
 });
 
-test('live booking still issues a ticket and reduces seats', async t => {
+test('authenticated booking uses the atomic database operation', async t => {
     const f = fixture();
-    const writes = [];
-    const database = {
-        from(table) {
-            if (table === 'passengers') return { upsert: async value => { writes.push({ table, value }); return { error: null }; } };
-            if (table === 'tickets') return { insert(value) { writes.push({ table, value }); return { select: async () => ({ data: [{ ticketNumber: 42 }], error: null }) }; } };
-            if (table === 'trains') return { update(value) { return { eq: async (column, id) => { writes.push({ table, value, column, id }); return { error: null }; } }; } };
-            throw Error('Unexpected table');
-        }
-    };
-    const base = await serve(t, createApp({ scheduleService: f.service, supabaseClient: database }));
-    const response = await fetch(base + '/api/book', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trainID: 'TR-01', passengerID: 'TEST', name: 'Test', contactNumber: '000', numberOfTickets: 1, paymentMethod: 'Cash at Station' }) });
+    const auth = databaseFixture();
+    const base = await serve(t, createApp({ scheduleService: f.service, databaseClient: auth.database }));
+    const headers = await login(base);
+    const response = await fetch(base + '/api/book', { method: 'POST', headers, body: JSON.stringify({ trainID: 'TR-01', passengerID: 'P2', numberOfTickets: 1, paymentMethod: 'Cash at Station' }) });
     assert.equal(response.status, 200);
-    const ticket = await response.json();
-    assert.deepEqual(ticket.ticketNumbers, [42]);
-    assert.equal(writes[1].value[0].status, 'Pending');
-    assert.equal(writes[2].value.availableSeats, 1);
+    assert.deepEqual((await response.json()).ticketNumbers, [42]);
+    const call = auth.calls.find(call => call.rpc === 'app_book');
+    assert.equal(call.args.p_passenger_id, 'P1');
+    assert.equal(call.args.p_count, 1);
+    assert.equal(auth.calls.some(call => call.operation === 'update'), false);
 });

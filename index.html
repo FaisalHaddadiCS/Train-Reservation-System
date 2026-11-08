@@ -110,7 +110,7 @@
                 <label>Confirm Password</label>
                 <input type="password" id="confirmStaffPassword" required>
             </div>
-            <button onclick="submitNewStaffPassword()" class="primary-btn" style="width: 100%; margin-top: 10px;">Save & Login</button>
+            <button onclick="submitNewStaffPassword()" class="primary-btn" style="width: 100%; margin-top: 10px;">Save Password</button>
         </div>
     </div>
 
@@ -129,7 +129,7 @@
             <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 20px;">Upload a copy of your transfer receipt to activate your ticket.</p>
             <input type="hidden" id="confirmTicketId">
             <div class="form-group">
-                <input type="file" id="receiptFile" accept="image/*" required style="padding: 10px; background: var(--bg-main);">
+                <input type="file" id="receiptFile" accept="image/png,image/jpeg,image/webp" required style="padding: 10px; background: var(--bg-main);">
             </div>
             <div class="form-row" style="margin-top: 20px;">
                 <button onclick="submitPaymentConfirmation()" class="primary-btn" style="flex:2;">Upload & Confirm</button>
@@ -211,7 +211,7 @@
                 </div>
                 <div class="form-row">
                     <div class="form-group"><label>Username</label><input type="text" id="reg-pass-username" required></div>
-                    <div class="form-group"><label>Password</label><input type="password" id="reg-pass-password" required></div>
+                    <div class="form-group"><label>Password</label><input type="password" id="reg-pass-password" minlength="6" maxlength="255" required></div>
                 </div>
                 <button type="submit" class="primary-btn">Create Passenger Account</button>
                 <div style="text-align: center; margin-top: 15px;"><span class="toggle-link" onclick="toggleAuthMode('login')">Back to Login</span></div>
@@ -234,6 +234,7 @@
                 <h1 class="logo-text" id="page-title">Schedules</h1>
                 <p class="subtitle" id="page-subtitle" style="margin-bottom:0;">View and manage routes</p>
             </div>
+            <button onclick="document.getElementById('firstLoginModal').style.display='flex'" class="select-btn">Change Password</button>
             <button onclick="logout()" style="background: none; border: 1px solid #ef4444; color: #ef4444; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-weight:600;">Logout</button>
         </div>
 
@@ -304,13 +305,13 @@
                     <div class="form-group">
                         <label>Payment Method</label>
                         <select id="paymentMethod" required>
-                            <option value="Credit Card">💳 Credit Card</option>
+                            <option value="Credit Card">💳 Card payment at station</option>
                             <option value="Cash at Station">💵 Cash at Station</option>
                         </select>
                     </div>
                     <div class="form-group" style="max-width: 160px;">
                         <label>Number of Tickets</label>
-                        <input type="number" id="numberOfTickets" value="1" min="1" required oninput="updateTicketPriceSummary()">
+                        <input type="number" id="numberOfTickets" value="1" min="1" max="20" required oninput="updateTicketPriceSummary()">
                     </div>
                 </div>
 
@@ -425,6 +426,10 @@
             document.getElementById('themeBtn').innerHTML = savedTheme === 'dark' ? '☀️' : '🌙';
         }
         initTheme();
+        window.addEventListener('unhandledrejection', event => {
+            event.preventDefault();
+            showSmartModal('error', 'Request Failed', escapeHtml(event.reason?.message || 'Please try again.'));
+        });
 
         function toggleTheme() {
             const body = document.body;
@@ -508,95 +513,103 @@
             if(mode === 'forgot') document.getElementById('login-subtitle').innerText = 'Reset Password';
         }
 
+        let sessionToken = null;
+
+        function escapeHtml(value) {
+            return String(value ?? '').replace(/[&<>"']/g, ch => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            }[ch]));
+        }
+
+        function inlineArg(value) {
+            return escapeHtml(JSON.stringify(String(value ?? '')));
+        }
+
+        async function apiFetch(url, options = {}) {
+            const headers = new Headers(options.headers);
+            if (sessionToken) headers.set('Authorization', 'Bearer ' + sessionToken);
+            const res = await fetch(url, { ...options, headers });
+            const handled = ['/api/login', '/api/book', '/api/passenger_users'].includes(url) || (url === '/api/trains' && (!options.method || options.method === 'GET'));
+            if (!res.ok && !handled) {
+                const body = await res.json().catch(() => ({}));
+                const message = body.message || 'Request failed. Please try again.';
+                showSmartModal('error', 'Request Failed', escapeHtml(message));
+                throw new Error(message);
+            }
+            return res;
+        }
+
         async function handlePassengerRegister(event) {
             event.preventDefault();
-            const n = document.getElementById('reg-pass-name').value;
-            const id = document.getElementById('reg-pass-id').value;
-            const c = document.getElementById('reg-pass-contact').value;
-            const e = document.getElementById('reg-pass-email').value.toLowerCase().trim();
-            const u = document.getElementById('reg-pass-username').value.toLowerCase().trim();
-            const p = document.getElementById('reg-pass-password').value;
-            
+            const payload = {
+                name: document.getElementById('reg-pass-name').value,
+                passengerID: document.getElementById('reg-pass-id').value,
+                contactNumber: document.getElementById('reg-pass-contact').value,
+                email: document.getElementById('reg-pass-email').value.toLowerCase().trim(),
+                username: document.getElementById('reg-pass-username').value.toLowerCase().trim(),
+                password: document.getElementById('reg-pass-password').value
+            };
             try {
-                const res = await fetch(`${API_URL}/passenger_users`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username: u, email: e, password: p, passengerID: id, name: n, contactNumber: c })
+                const res = await apiFetch(`${API_URL}/passenger_users`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
                 });
-                if(res.ok) {
-                    toggleAuthMode('login');
-                    showSmartModal('success', 'Account Created', 'Your passenger account is ready! Please sign in.');
-                } else { showSmartModal('error', 'Registration Failed', 'ID, Username, or Email might already exist.'); }
-            } catch(error) { showSmartModal('error', 'System Error', 'Could not connect to the server.'); }
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.message);
+                document.getElementById('reg-pass-password').value = '';
+                toggleAuthMode('login');
+                showSmartModal('success', 'Account Created', 'Your passenger account is ready. Please sign in.');
+            } catch (error) { showSmartModal('error', 'Registration Failed', escapeHtml(error.message)); }
         }
 
         function handleForgotPassword(event) {
             event.preventDefault();
-            const email = document.getElementById('forgot-email').value;
-            showSmartModal('success', 'Email Sent', `If an account exists for <strong>${email}</strong>, a reset link has been sent.`);
-            toggleAuthMode('login');
+            showSmartModal('error', 'Password Reset', 'Automatic email reset is not configured. Contact the project administrator.');
         }
 
         async function handleLogin(event) {
             event.preventDefault();
-            const u = document.getElementById('username').value.toLowerCase().trim();
-            const p = document.getElementById('password').value;
-            let loginSuccessFlag = false;
-
-            if(currentPortal === 'passenger') {
-                try {
-                    const res = await fetch(`${API_URL}/passenger_users`);
-                    const users = await res.json();
-                    const foundUser = users.find(user => user.username === u && user.password === p);
-                    if(foundUser) { loginSuccessFlag = true; loggedInPassengerData = foundUser; }
-                } catch(e) {}
-            } else {
-                if (currentRole === 'admin') {
-                    if (u === 'admin' && p === 'admin123') loginSuccessFlag = true;
-                } else {
-                    if (u === 'staff' && p === 'staff123') { loginSuccessFlag = true; launchApp(); return; }
-                    else {
-                        try {
-                            const res = await fetch(`${API_URL}/staff`);
-                            const staffUsers = await res.json();
-                            const foundUser = staffUsers.find(user => user.username === u && user.password === p);
-                            
-                            if(foundUser) {
-                                if(p === '111111') {
-                                    document.getElementById('firstLoginModal').style.display = 'flex';
-                                    return;
-                                } else {
-                                    loginSuccessFlag = true;
-                                }
-                            }
-                        } catch(e) {}
-                    }
+            try {
+                const res = await apiFetch(`${API_URL}/login`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        username: document.getElementById('username').value.toLowerCase().trim(),
+                        password: document.getElementById('password').value,
+                        portal: currentPortal
+                    })
+                });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.message);
+                sessionToken = data.token;
+                currentRole = data.role;
+                loggedInPassengerData = currentRole === 'passenger' ? data.account : null;
+                document.getElementById('password').value = '';
+                if (data.mustChangePassword) {
+                    document.getElementById('firstLoginModal').style.display = 'flex';
+                    return;
                 }
-            }
-
-            if(loginSuccessFlag) launchApp();
-            else showSmartModal('error', 'Access Denied', 'Invalid Credentials! Please try again.');
+                launchApp();
+            } catch (error) { showSmartModal('error', 'Access Denied', escapeHtml(error.message)); }
         }
 
         async function submitNewStaffPassword() {
-            const u = document.getElementById('username').value.toLowerCase().trim();
             const pass1 = document.getElementById('newStaffPassword').value;
             const pass2 = document.getElementById('confirmStaffPassword').value;
-            
-            if(pass1.length < 4) { showSmartModal('error', 'Weak Password', 'Password must be at least 4 characters.'); return; }
-            if(pass1 !== pass2) { showSmartModal('error', 'Mismatch', 'Passwords do not match.'); return; }
-            
-            const res = await fetch(`${API_URL}/staff/update-password`, {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username: u, newPassword: pass1 })
-            });
-            
-            if(res.ok) {
+            if (pass1.length < 6) { showSmartModal('error', 'Weak Password', 'Use at least 6 characters.'); return; }
+            if (pass1 !== pass2) { showSmartModal('error', 'Mismatch', 'Passwords do not match.'); return; }
+            try {
+                await apiFetch(`${API_URL}/staff/update-password`, {
+                    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ newPassword: pass1 })
+                });
+                sessionToken = null;
+                document.getElementById('main-app').style.display = 'none';
+                document.getElementById('login-section').style.display = 'block';
                 document.getElementById('firstLoginModal').style.display = 'none';
-                document.getElementById('password').value = pass1;
-                launchApp();
-            } else { showSmartModal('error', 'Error', 'Failed to update password.'); }
+                document.getElementById('newStaffPassword').value = '';
+                document.getElementById('confirmStaffPassword').value = '';
+                showSmartModal('success', 'Password Updated', 'Please sign in with your new password.');
+            } catch (error) { showSmartModal('error', 'Update Failed', escapeHtml(error.message)); }
         }
 
         function launchApp() {
@@ -669,11 +682,12 @@
         }
 
         let bookingAllowed = false;
+        let bookingInFlight = false;
         let scheduleRequestVersion = 0;
 
         function setBookingAvailability(allowed) {
             bookingAllowed = allowed;
-            document.getElementById('booking-submit').disabled = !allowed;
+            document.getElementById('booking-submit').disabled = !allowed || bookingInFlight;
             if (!allowed) {
                 document.getElementById('trainID').value = '';
                 window._selectedTrainPrice = 0;
@@ -690,7 +704,7 @@
             }
             let data;
             try {
-                const res = await fetch(`${API_URL}/trains`, { cache: 'no-store', signal: AbortSignal.timeout(8000) });
+                const res = await apiFetch(`${API_URL}/trains`, { cache: 'no-store', signal: AbortSignal.timeout(8000) });
                 data = await res.json();
                 if (!res.ok || !Array.isArray(data.trains)) {
                     throw new Error(data.message || 'Schedules are temporarily unavailable. Please try again later.');
@@ -728,17 +742,17 @@
 
                 const actionsHtml = (currentRole === 'admin' && schedule.bookingAllowed) ? `
                     <td style="text-align: center; width: 100px;">
-                        <button class="action-btn" onclick="openEditModal('${t.trainID}', '${t.price}', '${dbStatus}', '${t.departureDate}', '${t.departuretime || '10:00'}', '${t.totalCapacity}', '${t.totalCapacity - t.availableSeats}')" title="Edit">✏️</button>
+                        <button class="action-btn" onclick="openEditModal(${inlineArg(t.trainID)}, ${inlineArg(t.price)}, ${inlineArg(dbStatus)}, ${inlineArg(t.departureDate)}, ${inlineArg(t.departuretime || '10:00')}, ${inlineArg(t.totalCapacity)}, '${t.totalCapacity - t.availableSeats}')" title="Edit">✏️</button>
                     </td>` : '';
 
                 htmlStr += `
                     <tr>
-                        <td><span class="text-bold">${t.trainID}</span></td>
-                        <td><span class="text-bold">${t.departureStation}</span><span class="text-small">to ${t.arrivalStation}</span></td>
-                        <td><span class="text-bold">${t.departureDate}</span><span class="text-small">${t.departuretime || '10:00'}</span></td>
-                        <td style="text-align: center;"><span class="text-bold" style="color:${t.availableSeats>0?'#16a34a':'#dc2626'}">${t.availableSeats}</span></td>
-                        <td style="text-align: center;"><span class="text-bold">${t.price} SAR</span></td>
-                        <td style="text-align: center;"><span class="status ${statusClass}">${finalStatus}</span></td>
+                        <td><span class="text-bold">${escapeHtml(t.trainID)}</span></td>
+                        <td><span class="text-bold">${escapeHtml(t.departureStation)}</span><span class="text-small">to ${escapeHtml(t.arrivalStation)}</span></td>
+                        <td><span class="text-bold">${escapeHtml(t.departureDate)}</span><span class="text-small">${escapeHtml(t.departuretime || '10:00')}</span></td>
+                        <td style="text-align: center;"><span class="text-bold" style="color:${t.availableSeats>0?'#16a34a':'#dc2626'}">${escapeHtml(t.availableSeats)}</span></td>
+                        <td style="text-align: center;"><span class="text-bold">${escapeHtml(t.price)} SAR</span></td>
+                        <td style="text-align: center;"><span class="status ${statusClass}">${escapeHtml(finalStatus)}</span></td>
                         ${actionsHtml}
                     </tr>
                 `;
@@ -783,7 +797,7 @@
             }
 
             try {
-                const res = await fetch(`${API_URL}/trains/${id}`, {
+                const res = await apiFetch(`${API_URL}/trains/${id}`, {
                     method: 'PATCH',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({
@@ -799,7 +813,7 @@
                 const result = await res.json();
 
                 if(!res.ok) {
-                    showSmartModal('error', 'Update Failed', result.error || 'Unknown error from server.');
+                    showSmartModal('error', 'Update Failed', escapeHtml(result.error || 'Unknown error from server.'));
                     return;
                 }
 
@@ -824,13 +838,13 @@
                 const isUnavailable = !schedule.bookingAllowed || t.availableSeats === 0 || dbStatus === 'Cancelled';
                 let btnHtml = isUnavailable 
                     ? `<button type="button" class="select-btn" style="border-color:#dc2626; color:#dc2626; cursor:not-allowed;" disabled>Unavailable</button>` 
-                    : `<button type="button" class="select-btn" onclick="selectTrainForBooking('${t.trainID}')">Select</button>`;
+                    : `<button type="button" class="select-btn" onclick="selectTrainForBooking(${inlineArg(t.trainID)})">Select</button>`;
 
                 htmlStr += `
                     <div class="train-card searchable-card">
                         <div class="train-card-info">
-                            <strong class="search-target">${t.trainName || 'Route'} (${t.trainID})</strong>
-                            <span class="search-target">${t.departureStation} ➔ ${t.arrivalStation} | ${t.price} SAR | <strong>${t.availableSeats} Seats Left</strong></span>
+                            <strong class="search-target">${t.trainName || 'Route'} (${escapeHtml(t.trainID)})</strong>
+                            <span class="search-target">${escapeHtml(t.departureStation)} ➔ ${escapeHtml(t.arrivalStation)} | ${escapeHtml(t.price)} SAR | <strong>${escapeHtml(t.availableSeats)} Seats Left</strong></span>
                         </div>
                         ${btnHtml}
                     </div>
@@ -890,7 +904,7 @@
             const price = document.getElementById('new-price').value;
             if(!dep || !arr || !price) { showSmartModal('error', 'Fields Required', 'Please fill all route fields.'); return; }
             
-            await fetch(`${API_URL}/trains`, {
+            await apiFetch(`${API_URL}/trains`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ departureStation: dep, arrivalStation: arr, price: price })
@@ -905,11 +919,13 @@
 
         async function bookTicket(event) {
             event.preventDefault();
+            if (bookingInFlight) return;
             if (!bookingAllowed) {
                 showSmartModal('error', 'Booking Unavailable', 'Refresh schedules before booking.');
                 return;
             }
-            const count = parseInt(document.getElementById('numberOfTickets').value) || 1;
+            const count = Number(document.getElementById('numberOfTickets').value);
+            if (!Number.isInteger(count) || count < 1 || count > 20) { showSmartModal('error', 'Invalid Count', 'Choose 1 to 20 tickets.'); return; }
             const payload = { 
                 trainID: document.getElementById('trainID').value, 
                 passengerID: document.getElementById('passengerID').value, 
@@ -924,13 +940,18 @@
             }
             
             let res, result;
+            bookingInFlight = true;
+            document.getElementById('booking-submit').disabled = true;
             try {
-                res = await fetch(`${API_URL}/book`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
+                res = await apiFetch(`${API_URL}/book`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
                 result = await res.json();
             } catch (error) {
                 setBookingAvailability(false);
                 showSmartModal('error', 'Connection Lost', 'The booking result is unknown. Check your bookings before submitting again.');
                 return;
+            } finally {
+                bookingInFlight = false;
+                document.getElementById('booking-submit').disabled = !bookingAllowed;
             }
             if (res.status === 503) {
                 setBookingAvailability(false);
@@ -945,7 +966,7 @@
                 } else {
                     successMsg = `Ticket issued successfully. PNR: <strong style="color:var(--text-main); font-size:16px;">${result.ticketNumber}</strong>`;
                 }
-                showSmartModal('success', 'Reservation Confirmed!', successMsg);
+                showSmartModal('success', 'Booking Created — Payment Pending', successMsg);
                 document.getElementById('trainID').value = '';
                 document.getElementById('trainID').style.backgroundColor = 'var(--border-color)';
                 document.getElementById('numberOfTickets').value = '1';
@@ -958,12 +979,12 @@
                 }
                 loadBookingTrains(); loadTickets(); 
             } else { 
-                showSmartModal('error', 'Booking Failed', result.message || 'Error processing reservation.');
+                showSmartModal('error', 'Booking Failed', escapeHtml(result.message || 'Error processing reservation.'));
             }
         }
 
         async function loadTickets() {
-            const res = await fetch(`${API_URL}/tickets`);
+            const res = await apiFetch(`${API_URL}/tickets`);
             globalTicketsData = await res.json();
             
             let ticketsToDisplay = globalTicketsData;
@@ -981,32 +1002,32 @@
                 let actions = '';
                 if(isPending) {
                     if(currentRole === 'passenger') {
-                        actions += `<button class="action-btn" onclick="openUploadModal('${t.ticketNumber}')" style="background:#d97706; color:white; padding:4px 8px; border-radius:4px;">📤 Pay</button>`;
+                        actions += `<button class="action-btn" onclick="openUploadModal(${inlineArg(t.ticketNumber)})" style="background:#d97706; color:white; padding:4px 8px; border-radius:4px;">📤 Pay</button>`;
                     } else {
-                        actions += `<button class="action-btn" onclick="viewReceipt('${t.ticketNumber}')" style="background:#6b7280; color:white; padding:4px 8px; border-radius:4px;">👁️</button>`;
-                        actions += `<button class="action-btn" onclick="approvePayment('${t.ticketNumber}')" style="background:#16a34a; color:white; padding:4px 8px; border-radius:4px; margin:0 5px;">✅</button>`;
-                        actions += `<button class="action-btn" onclick="rejectPayment('${t.ticketNumber}')" style="background:#dc2626; color:white; padding:4px 8px; border-radius:4px;">❌</button>`;
+                        actions += `<button class="action-btn" onclick="viewReceipt(${inlineArg(t.ticketNumber)})" style="background:#6b7280; color:white; padding:4px 8px; border-radius:4px;">👁️</button>`;
+                        actions += `<button class="action-btn" onclick="approvePayment(${inlineArg(t.ticketNumber)})" style="background:#16a34a; color:white; padding:4px 8px; border-radius:4px; margin:0 5px;">✅</button>`;
+                        actions += `<button class="action-btn" onclick="rejectPayment(${inlineArg(t.ticketNumber)})" style="background:#dc2626; color:white; padding:4px 8px; border-radius:4px;">❌</button>`;
                     }
                 }
-                actions += `<button class="action-btn" onclick="printDocument('${t.ticketNumber}', 'receipt')" style="background:var(--primary-blue); color:white; padding:4px 8px; border-radius:4px; margin-right:5px; font-size: 14px;">🧾</button>`;
-                actions += `<button class="action-btn" onclick="printDocument('${t.ticketNumber}', 'boarding')" style="background:var(--primary-blue); color:white; padding:4px 8px; border-radius:4px; font-size: 14px;">🎟️</button>`;
+                actions += `<button class="action-btn" onclick="printDocument(${inlineArg(t.ticketNumber)}, 'receipt')" style="background:var(--primary-blue); color:white; padding:4px 8px; border-radius:4px; margin-right:5px; font-size: 14px;">🧾</button>`;
+                actions += `<button class="action-btn" onclick="printDocument(${inlineArg(t.ticketNumber)}, 'boarding')" style="background:var(--primary-blue); color:white; padding:4px 8px; border-radius:4px; font-size: 14px;">🎟️</button>`;
 
                 const cancelHtml = (currentRole !== 'passenger') ? `
                     <td style="text-align: center; width: 100px;">
-                        <button class="action-btn" onclick="cancelTicket('${t.ticketNumber}')">🗑️</button>
+                        <button class="action-btn" onclick="cancelTicket(${inlineArg(t.ticketNumber)})">🗑️</button>
                     </td>` : '';
 
                 htmlStr += `
                     <tr>
-                        <td><span class="text-bold">#${t.ticketNumber}</span></td>
-                        <td><span class="text-bold">${t.passengerName}</span><span class="text-small">ID: ${t.passengerID}</span></td>
-                        <td style="text-align: center;"><span class="text-bold">${t.trainID}</span></td>
+                        <td><span class="text-bold">#${escapeHtml(t.ticketNumber)}</span></td>
+                        <td><span class="text-bold">${escapeHtml(t.passengerName)}</span><span class="text-small">ID: ${escapeHtml(t.passengerID)}</span></td>
+                        <td style="text-align: center;"><span class="text-bold">${escapeHtml(t.trainID)}</span></td>
                        <td style="text-align: center;">
     <span class="status" style="
         background: ${t.status === 'Pending' ? '#d9770620' : (t.status === 'Cancelled' ? '#ef444420' : '#16a34a20')}; 
         color: ${t.status === 'Pending' ? '#d97706' : (t.status === 'Cancelled' ? '#dc2626' : '#16a34a')};
     ">
-        ${t.status}
+        ${escapeHtml(t.status)}
     </span>
 </td>
                         <td style="text-align: center; width: 180px;">${actions}</td>
@@ -1018,9 +1039,9 @@
         }
 
         function cancelTicket(id) {
-            showSmartModal('confirm', 'Cancel Booking', `Are you sure you want to cancel passenger seat <strong>#${id}</strong>?`, async () => {
-                await fetch(`${API_URL}/tickets/${id}`, { method: 'DELETE' });
-                loadTickets(); loadBookingTrains(); loadSchedules(); loadReports();
+            showSmartModal('confirm', 'Cancel Booking', `Are you sure you want to cancel passenger seat <strong>#${escapeHtml(id)}</strong>?`, async () => {
+                await apiFetch(`${API_URL}/tickets/${id}`, { method: 'DELETE' });
+                loadTickets(); loadBookingTrains(); if (currentRole === 'admin') { loadSchedules(); loadReports(); }
             });
         }
 
@@ -1039,6 +1060,9 @@
             if(!fileInput.files[0]) { alert("Please select a file first."); return; }
             
             const file = fileInput.files[0];
+            if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type) || file.size > 2 * 1024 * 1024) {
+                showSmartModal('error', 'Invalid Receipt', 'Choose a PNG, JPEG or WebP image up to 2 MB.'); return;
+            }
             const reader = new FileReader();
             
             reader.onloadend = async function() {
@@ -1046,7 +1070,7 @@
                 const ticketId = document.getElementById('confirmTicketId').value;
                 
                 try {
-                    await fetch(`${API_URL}/tickets/${ticketId}/upload`, { 
+                    await apiFetch(`${API_URL}/tickets/${ticketId}/upload`, {
                         method: 'PATCH', 
                         headers: {'Content-Type': 'application/json'},
                         body: JSON.stringify({ receiptPath: base64String }) 
@@ -1062,7 +1086,7 @@
         async function checkPendingReceipts() {
             if(currentRole !== 'passenger') {
                 try {
-                    const res = await fetch(`${API_URL}/tickets`);
+                    const res = await apiFetch(`${API_URL}/tickets`);
                     const tks = await res.json();
                     const pendingCount = tks.filter(t => t.status === 'Pending' && t.receiptPath && t.receiptPath.length > 50).length;
                     
@@ -1076,18 +1100,18 @@
         }
 
         function approvePayment(id) {
-            showSmartModal('confirm', 'Approve Payment', `Are you sure you want to confirm payment for ticket <strong>#${id}</strong>?`, async () => {
+            showSmartModal('confirm', 'Approve Payment', `Are you sure you want to confirm payment for ticket <strong>#${escapeHtml(id)}</strong>?`, async () => {
                 try {
-                    await fetch(`${API_URL}/tickets/${id}/confirm`, { method: 'PATCH' });
-                    loadTickets(); loadReports();
+                    await apiFetch(`${API_URL}/tickets/${id}/confirm`, { method: 'PATCH' });
+                    loadTickets(); if (currentRole === 'admin') loadReports();
                     showSmartModal('success', 'Payment Confirmed', 'The ticket is now Confirmed!');
                 } catch(e) {}
             });
         }
 
         function rejectPayment(id) {
-            showSmartModal('confirm', 'Reject Payment', `Are you sure you want to reject payment for ticket <strong>#${id}</strong>?`, async () => {
-                await fetch(`${API_URL}/tickets/${id}/reject`, { method: 'PATCH' });
+            showSmartModal('confirm', 'Reject Payment', `Are you sure you want to reject payment for ticket <strong>#${escapeHtml(id)}</strong>?`, async () => {
+                await apiFetch(`${API_URL}/tickets/${id}/reject`, { method: 'PATCH' });
                 loadTickets();
                 showSmartModal('error', 'Rejected', 'The payment was rejected.');
             });
@@ -1095,7 +1119,7 @@
 
         async function loadReports() {
             try {
-                const res = await fetch(`${API_URL}/reports`);
+                const res = await apiFetch(`${API_URL}/reports`);
                 const data = await res.json();
                 document.getElementById('total-revenue').innerText = `${data.totalRevenue} SAR`;
 
@@ -1109,10 +1133,10 @@
 
                     htmlStr += `
                         <tr>
-                            <td><span class="text-bold">${t.trainName}</span><span class="text-small">ID: ${t.trainID}</span></td>
-                            <td style="text-align: center;"><span class="text-bold">${t.totalCapacity}</span></td>
-                            <td style="text-align: center;"><span class="text-bold">${t.bookedSeats}</span></td>
-                            <td style="text-align: center;"><span class="status" style="background: ${rateColor}20; color: ${rateColor};">${t.occupancyRate}%</span></td>
+                            <td><span class="text-bold">${escapeHtml(t.trainName)}</span><span class="text-small">ID: ${escapeHtml(t.trainID)}</span></td>
+                            <td style="text-align: center;"><span class="text-bold">${escapeHtml(t.totalCapacity)}</span></td>
+                            <td style="text-align: center;"><span class="text-bold">${escapeHtml(t.bookedSeats)}</span></td>
+                            <td style="text-align: center;"><span class="status" style="background: ${rateColor}20; color: ${rateColor};">${escapeHtml(t.occupancyRate)}%</span></td>
                         </tr>
                     `;
                 });
@@ -1120,7 +1144,10 @@
             } catch(e) {}
         }
 
-        function logout() { location.reload(); }
+        async function logout() {
+            try { await apiFetch(`${API_URL}/logout`, { method: 'POST' }); }
+            finally { sessionToken = null; location.reload(); }
+        }
 
         function viewReceipt(ticketNum) {
             const ticket = globalTicketsData.find(t => t.ticketNumber == ticketNum);
@@ -1140,9 +1167,10 @@
         function printDocument(ticketNum, type) {
             const ticket = globalTicketsData.find(t => t.ticketNumber == ticketNum);
             if(!ticket) return;
+            if (type === 'boarding' && ticket.status !== 'Confirmed') { showSmartModal('error', 'Not Valid for Travel', 'Boarding passes are available only for confirmed tickets.'); return; }
 
             const isPending = ticket.status === 'Pending';
-            const statusDisplay = isPending ? 'PENDING (Cash at Station)' : 'PAID IN FULL';
+            const statusDisplay = ticket.status === 'Cancelled' ? 'CANCELLED' : isPending ? 'PAYMENT PENDING' : 'PAYMENT CONFIRMED';
             const warningText = isPending ? '<div style="color: #dc2626; font-weight: bold; text-align: center; margin-top: 10px;">⚠️ This ticket is NOT VALID for travel until payment is confirmed at the station.</div>' : '';
 
             const printWindow = window.open('', '', 'height=600,width=800');
@@ -1165,19 +1193,19 @@
 
             if(type === 'receipt') {
                 content = `
-                    <html><head><title>Payment Receipt - #${ticket.ticketNumber}</title>${commonStyles}</head><body>
+                    <html><head><title>Payment Receipt - #${escapeHtml(ticket.ticketNumber)}</title>${commonStyles}</head><body>
                         <div class="print-box">
                             <div class="header">
                                 <h1>💳 PAYMENT RECEIPT</h1>
                                 <p>Train Booking System</p>
                             </div>
-                            <div class="row"><span class="label">Receipt No:</span><span class="value">REC-${ticket.ticketNumber}-${Date.now().toString().slice(-4)}</span></div>
+                            <div class="row"><span class="label">Receipt No:</span><span class="value">REC-${escapeHtml(ticket.ticketNumber)}-${Date.now().toString().slice(-4)}</span></div>
                             <div class="row"><span class="label">Date:</span><span class="value">${new Date().toLocaleString()}</span></div>
-                            <div class="row"><span class="label">Passenger Name:</span><span class="value">${ticket.passengerName}</span></div>
-                            <div class="row"><span class="label">Route ID:</span><span class="value">${ticket.trainID} (${ticket.trainName})</span></div>
-                            <div class="row"><span class="label">Payment Method:</span><span class="value">${ticket.paymentMethod}</span></div>
+                            <div class="row"><span class="label">Passenger Name:</span><span class="value">${escapeHtml(ticket.passengerName)}</span></div>
+                            <div class="row"><span class="label">Route ID:</span><span class="value">${escapeHtml(ticket.trainID)} (${escapeHtml(ticket.trainName)})</span></div>
+                            <div class="row"><span class="label">Payment Method:</span><span class="value">${escapeHtml(ticket.paymentMethod)}</span></div>
                             <div class="row"><span class="label">Status:</span><span class="value" style="color: ${isPending ? '#d97706' : '#16a34a'}">${statusDisplay}</span></div>
-                            <div class="row" style="border:none; margin-top: 20px;"><span class="label" style="font-size: 20px;">Total Amount:</span><span class="value total">${ticket.price} SAR</span></div>
+                            <div class="row" style="border:none; margin-top: 20px;"><span class="label" style="font-size: 20px;">Total Amount:</span><span class="value total">${escapeHtml(ticket.price)} SAR</span></div>
                             ${warningText}
                             <div class="footer">Thank you for your business. Retain this receipt for your records.</div>
                         </div>
@@ -1185,7 +1213,7 @@
                 `;
             } else { 
                 content = `
-                    <html><head><title>Boarding Pass - #${ticket.ticketNumber}</title>${commonStyles}
+                    <html><head><title>Boarding Pass - #${escapeHtml(ticket.ticketNumber)}</title>${commonStyles}
                     <style>
                         .print-box { border-left: 8px solid ${isPending ? '#d97706' : '#2563eb'}; }
                         .stations { display: flex; justify-content: space-between; align-items: center; margin: 25px 0; font-size: 24px; font-weight: bold; }
@@ -1198,17 +1226,17 @@
                                 <h1>🎟️ BOARDING PASS</h1>
                                 <p>Have a safe trip!</p>
                             </div>
-                            <div class="row"><span class="label">PNR / Ticket #:</span><span class="value" style="font-size: 18px; color: #2563eb;">${ticket.ticketNumber}</span></div>
-                            <div class="row"><span class="label">Passenger:</span><span class="value">${ticket.passengerName}</span></div>
+                            <div class="row"><span class="label">PNR / Ticket #:</span><span class="value" style="font-size: 18px; color: #2563eb;">${escapeHtml(ticket.ticketNumber)}</span></div>
+                            <div class="row"><span class="label">Passenger:</span><span class="value">${escapeHtml(ticket.passengerName)}</span></div>
                             
                             <div class="stations">
-                                <div>${ticket.departureStation}</div>
+                                <div>${escapeHtml(ticket.departureStation)}</div>
                                 <div class="arrow">➔</div>
-                                <div>${ticket.arrivalStation}</div>
+                                <div>${escapeHtml(ticket.arrivalStation)}</div>
                             </div>
                             
-                            <div class="row"><span class="label">Train / Route:</span><span class="value">${ticket.trainName} (${ticket.trainID})</span></div>
-                            <div class="row"><span class="label">Date & Time:</span><span class="value">${ticket.departureDate} at 10:00 AM</span></div>
+                            <div class="row"><span class="label">Train / Route:</span><span class="value">${escapeHtml(ticket.trainName)} (${escapeHtml(ticket.trainID)})</span></div>
+                            <div class="row"><span class="label">Date & Time:</span><span class="value">${escapeHtml(ticket.departureDate)} at 10:00 AM</span></div>
                             
                             ${warningText}
                             <div class="barcode">||| |||| | ||||| || |</div>
@@ -1267,42 +1295,37 @@
             const email = document.getElementById('new-staff-email').value.toLowerCase().trim();
             if(!user || !email) { showSmartModal('error', 'Fields Required', 'Please fill all fields.'); return; }
             
-            const res = await fetch(`${API_URL}/staff`, {
+            const res = await apiFetch(`${API_URL}/staff`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ username: user, email: email })
             });
             
             if(res.ok) {
-                showSmartModal('success', 'Staff Created', `Account created! Temporary password is <strong>111111</strong>`);
+                const created = await res.json();
+                showSmartModal('success', 'Staff Created', `Account created. Temporary password: <strong>${escapeHtml(created.temporaryPassword)}</strong>. Share it privately with the staff member.`);
                 document.getElementById('new-staff-user').value = '';
                 document.getElementById('new-staff-email').value = '';
                 loadStaffList();
             } else { 
                 const errData = await res.json();
-                showSmartModal('error', 'Failed', errData.message || 'An error occurred.'); 
+                showSmartModal('error', 'Failed', escapeHtml(errData.message || 'An error occurred.'));
             }
         }
 
         async function loadStaffList() {
             const list = document.getElementById('staffList');
-            let htmlStr = `
-                <tr>
-                    <td><span class="text-bold">staff</span><span class="text-small">System Default Account</span></td>
-                    <td style="text-align: center;"><span class="status status-on-time">Staff</span></td>
-                    <td style="text-align: center; width: 100px;"><span style="color:var(--text-muted); font-size: 11px;">Protected</span></td>
-                </tr>
-            `;
+            let htmlStr = '';
             try {
-                const res = await fetch(`${API_URL}/staff`);
+                const res = await apiFetch(`${API_URL}/staff`);
                 const staffUsers = await res.json();
                 staffUsers.forEach(user => {
                     htmlStr += `
                         <tr>
-                            <td><span class="text-bold">${user.username}</span><span class="text-small">${user.email}</span></td>
-                            <td style="text-align: center;"><span class="status status-on-time">Staff</span></td>
+                            <td><span class="text-bold">${escapeHtml(user.username)}</span><span class="text-small">${escapeHtml(user.email)}</span></td>
+                            <td style="text-align: center;"><span class="status status-on-time">${escapeHtml(user.role)}</span></td>
                             <td style="text-align: center; width: 100px;">
-                                <button class="action-btn" onclick="deleteStaff('${user.username}')">🗑️</button>
+                                ${user.role === 'Staff' ? `<button class="action-btn" onclick="deleteStaff(${inlineArg(user.username)})">🗑️</button>` : 'Protected'}
                             </td>
                         </tr>
                     `;
@@ -1312,14 +1335,14 @@
         }
 
         function deleteStaff(username) {
-            showSmartModal('confirm', 'Revoke Access', `Are you sure you want to revoke access for staff member <strong>'${username}'</strong>?`, async () => {
-                await fetch(`${API_URL}/staff/${username}`, { method: 'DELETE' });
+            showSmartModal('confirm', 'Revoke Access', `Are you sure you want to revoke access for staff member <strong>'${escapeHtml(username)}'</strong>?`, async () => {
+                await apiFetch(`${API_URL}/staff/${username}`, { method: 'DELETE' });
                 loadStaffList();
             });
         }
 
         async function loadAdminPassengers() {
-            const res = await fetch(`${API_URL}/admin/passengers`);
+            const res = await apiFetch(`${API_URL}/admin/passengers`);
             const passengers = await res.json();
             const list = document.getElementById('adminPassengerList');
             list.innerHTML = '';
@@ -1327,13 +1350,13 @@
             passengers.forEach(p => {
                 list.innerHTML += `
                     <tr>
-                        <td><span class="text-bold">${p.name}</span></td>
-                        <td><span class="text-bold">${p.username}</span></td>
-                        <td>${p.email}</td>
-                        <td><span class="text-bold">${p.passengerID}</span></td>
-                        <td>${p.contactNumber}</td>
+                        <td><span class="text-bold">${escapeHtml(p.name)}</span></td>
+                        <td><span class="text-bold">${escapeHtml(p.username)}</span></td>
+                        <td>${escapeHtml(p.email)}</td>
+                        <td><span class="text-bold">${escapeHtml(p.passengerID)}</span></td>
+                        <td>${escapeHtml(p.contactNumber)}</td>
                         <td style="text-align: center;">
-                            <button class="action-btn" onclick="deletePassenger('${p.passengerID}')" title="Delete Passenger">🗑️</button>
+                            <button class="action-btn" onclick="deletePassenger(${inlineArg(p.passengerID)})" title="Delete Passenger">🗑️</button>
                         </td>
                     </tr>
                 `;
@@ -1341,10 +1364,10 @@
         }
 
         async function deletePassenger(id) {
-            showSmartModal('confirm', 'Delete Passenger', `Are you sure you want to delete passenger <strong>#${id}</strong>? This action cannot be undone.`, async () => {
+            showSmartModal('confirm', 'Delete Passenger', `Are you sure you want to delete passenger <strong>#${escapeHtml(id)}</strong>? This action cannot be undone.`, async () => {
                 try {
-                    await fetch(`${API_URL}/admin/passengers/${id}`, { method: 'DELETE' });
-                    showSmartModal('success', 'Deleted', 'Passenger account removed.');
+                    await apiFetch(`${API_URL}/admin/passengers/${id}`, { method: 'DELETE' });
+                    showSmartModal('success', 'Deleted', 'Passenger login removed. Historical bookings are retained.');
                     loadAdminPassengers();
                 } catch(e) {
                     showSmartModal('error', 'Error', 'Failed to delete.');

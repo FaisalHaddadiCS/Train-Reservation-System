@@ -15,12 +15,13 @@ function ui() {
     const modals = [];
     const context = vm.createContext({
         document: { getElementById, querySelectorAll: () => [] }, window: {},
-        AbortSignal, TypeError, console,
+        AbortSignal, TypeError, console, Headers,
         fetch: async () => { requests++; return { ok: response.source !== 'unavailable', json: async () => structuredClone(response) }; },
         showSmartModal: (...args) => modals.push(args)
     });
     const block = (start, end) => html.slice(html.indexOf(start), html.indexOf(end));
     vm.runInContext("const API_URL = '/api'; const currentRole = 'admin';\n" +
+        block('        let sessionToken = null;', '        async function handlePassengerRegister') +
         block('        let bookingAllowed = false;', '        function openEditModal') +
         block('        async function loadBookingTrains()', '        function filterTrains') +
         block('        function selectTrainForBooking(id)', '        function updateTicketPriceSummary') +
